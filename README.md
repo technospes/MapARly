@@ -249,8 +249,10 @@ Distributed under the MIT License. See `LICENSE` for details.
 
 ---
 
-## Contact
+## Project Maintainer
 
-**Project Maintainer:** Technospes  
-**Project Link:** https://github.com/technospes/ar_navigation_app_with_unity
+**Technospes**
+
+- GitHub (Technospes): https://github.com/technospes  
+- LinkedIn (Ayush Shukla): https://www.linkedin.com/in/ayushshukla-ar/
 
