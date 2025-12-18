@@ -64,7 +64,7 @@ Example views:
 
 **Core Engine & Frameworks**
 
-- Unity 2021.3+ (LTS)  
+- Unity 2022.3+ (LTS)  
 - ARCore / ARFoundation (tracking, plane detection, anchors)  
 - Mapbox SDK for Unity (geospatial data, routing, geocoding)
 
@@ -103,7 +103,7 @@ MapARly follows a modular, mobile‑optimized architecture:
 
 ### Prerequisites
 
-- Unity Hub + Unity 2021.3.x (LTS)  
+- Unity Hub + Unity 2022.3+ (LTS)  
 - Mapbox access token (https://www.mapbox.com)  
 - Android SDK/NDK (for Android builds) or Xcode (for iOS builds)
 
@@ -157,9 +157,9 @@ Use Unity Remote on a connected device to validate UI flow and basic AR behavior
 - **POI Interaction** – Tap floating POI icons to view name, distance, and additional metadata.
 
 ---
-```
-## Project Folder Structure
 
+## Project Folder Structure
+```
 Assets/
 ├── AI_Models/ # YOLOv5n ONNX model and COCO label files
 ├── Mapbox/ # Mapbox SDK core, materials, and prefabs
