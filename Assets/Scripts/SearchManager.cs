@@ -36,6 +36,7 @@ public class SearchManager : MonoBehaviour
     private Vector2d? _currentUserCoordinates;
     private bool _isFollowingUser = false;
     private bool _isAutoCentering = false;
+    private Vector2d? _lastUserGpsPosition; // To calculate heading
     [SerializeField] private float _minTrackingDistance = 2.0f;
     [Header("UI Elements")]
     public TMP_InputField startInput;
@@ -136,6 +137,93 @@ public class SearchManager : MonoBehaviour
                 HandleMapRightClick();
             }
         }
+        HandleLiveUserTracking();
+    }
+    private void HandleLiveUserTracking()
+    {
+        if (!_isFollowingUser || Input.location.status != LocationServiceStatus.Running)
+        {
+            return;
+        }
+
+        var newLocation = Input.location.lastData;
+        var newCoords = new Vector2d(newLocation.latitude, newLocation.longitude);
+
+        // Only update if the user has moved a significant distance
+        if (_currentUserCoordinates.HasValue &&
+            CalculateDistance(_currentUserCoordinates.Value, newCoords) < _minTrackingDistance)
+        {
+            return;
+        }
+
+        _lastUserGpsPosition = _currentUserCoordinates; // Store the old position
+        _currentUserCoordinates = newCoords; // Set the new position
+
+        _isAutoCentering = true;
+        map.UpdateMap(newCoords, map.Zoom); // Center map
+        PlaceUserMarker(); // Place/move the marker (this will now also handle rotation)
+
+        // --- NEW ROUTE TRIMMING LOGIC ---
+        if (_currentRouteGeometry != null && _currentRouteGeometry.Count > 0)
+        {
+            UpdateRouteLine(newCoords);
+        }
+    }
+    private void UpdateRouteLine(Vector2d userGps)
+    {
+        if (currentRouteLine == null) return;
+        var lineRenderer = currentRouteLine.GetComponent<LineRenderer>();
+        if (lineRenderer == null) return;
+
+        // 1. Find the closest point on the route
+        int closestPointIndex = FindClosestPointOnRoute(userGps);
+        if (closestPointIndex == -1)
+        {
+            // User is very far off-route, maybe hide the line?
+            lineRenderer.positionCount = 0;
+            return;
+        }
+
+        // 2. Create a new list of points for the LineRenderer
+        List<Vector3> newWorldPositions = new List<Vector3>();
+
+        // 3. Add the user's current, "snapped" position as the new start of the line
+        Vector3 userWorldPos = map.GeoToWorldPosition(userGps, true) + Vector3.up * 2f;
+        newWorldPositions.Add(userWorldPos);
+
+        // 4. Add all remaining points from the original route
+        for (int i = closestPointIndex; i < _currentRouteGeometry.Count; i++)
+        {
+            newWorldPositions.Add(map.GeoToWorldPosition(_currentRouteGeometry[i], true) + Vector3.up * 2f);
+        }
+
+        // 5. Update the LineRenderer
+        lineRenderer.positionCount = newWorldPositions.Count;
+        lineRenderer.SetPositions(newWorldPositions.ToArray());
+    }
+
+
+    private int FindClosestPointOnRoute(Vector2d userGps)
+    {
+        double minDistance = double.MaxValue;
+        int closestIndex = 0; // Default to 0
+
+        // This is a simple but effective check.
+        // For long routes, you'd optimize this to only check nearby segments.
+        for (int i = 0; i < _currentRouteGeometry.Count; i++)
+        {
+            double distance = CalculateDistance(userGps, _currentRouteGeometry[i]);
+            if (distance < minDistance)
+            {
+                minDistance = distance;
+                closestIndex = i;
+            }
+        }
+
+        // Optional: Add a threshold to detect if user is "off-route"
+        // if (minDistance > 100) return -1; // e.g., user is 100m off-route
+
+        return closestIndex;
     }
     void HandleMapRightClick()
     {
@@ -183,11 +271,85 @@ public class SearchManager : MonoBehaviour
     // This is our new "master" handler that is called every time the map pans or zooms.
     private void UpdateMapElements()
     {
-        RedrawCurrentRoute();    // Redraws the route line
-        RepositionUserMarker();  // Repositions the user marker
-        RepositionTemporaryPin();
+        // This method is called by the map whenever it is panned or zoomed.
+
+        if (_isAutoCentering)
+        {
+            // The script itself moved the map, so do nothing.
+            _isAutoCentering = false;
+            return;
+        }
+
+        // If the map was updated and it *wasn't* by our script,
+        // it must have been the user. Break the follow mode.
+        _isFollowingUser = false;
     }
     // This method updates the temporary pin's position.
+    private IEnumerator BeginNavigationProcess()
+    {
+        // --- 1. Get Coordinates (if needed) ---
+        if ((!startCoordinates.HasValue && string.IsNullOrEmpty(startPlaceId)) ||
+            (!destinationCoordinates.HasValue && string.IsNullOrEmpty(destinationPlaceId)))
+        {
+            Debug.LogWarning("Start or destination is missing.");
+            yield break;
+        }
+        if (!startCoordinates.HasValue) { yield return StartCoroutine(GetPlaceDetails(startPlaceId, true)); }
+        if (!destinationCoordinates.HasValue) { yield return StartCoroutine(GetPlaceDetails(destinationPlaceId, false)); }
+
+        if (!startCoordinates.HasValue || !destinationCoordinates.HasValue)
+        {
+            Debug.LogError("Could not get coordinates for start or destination!");
+            yield break;
+        }
+
+        // --- 2. Fetch the Route using the SELECTED profile ---
+        var directions = MapboxAccess.Instance.Directions;
+        var waypoints = new Vector2d[] { startCoordinates.Value, destinationCoordinates.Value };
+        var directionResource = new DirectionResource(waypoints, _selectedProfile) { Overview = Overview.Full };
+
+        DirectionsResponse response = null;
+        yield return directions.Query(directionResource, (res) => response = res);
+
+        if (response == null || response.Routes == null || response.Routes.Count < 1)
+        {
+            Debug.LogError("Mapbox Directions API returned no routes!");
+            yield break;
+        }
+
+        _currentRouteGeometry = response.Routes[0].Geometry;
+        DrawRouteLine(_currentRouteGeometry); // Draw the full 2D line
+
+        // --- 3. Decide What to Do Next ---
+        if (_selectedProfile == RoutingProfile.Walking)
+        {
+            Debug.Log("Walking profile selected. Loading AR Scene...");
+            DataManager.Instance.startCoordinates = startCoordinates;
+            DataManager.Instance.destinationCoordinates = destinationCoordinates;
+            UnityEngine.SceneManagement.SceneManager.LoadScene("ARScene");
+        }
+        else if (_selectedProfile == RoutingProfile.Driving)
+        {
+            Debug.Log("Driving profile selected. Starting 2D Navigation.");
+
+            // --- THIS IS THE NEW LOGIC ---
+            // Automatically start "follow" mode and snap the map to the user.
+            if (Input.location.status == LocationServiceStatus.Running)
+            {
+                _isFollowingUser = true; // This starts the live tracking!
+                _isAutoCentering = true;
+
+                var loc = Input.location.lastData;
+                _currentUserCoordinates = new Vector2d(loc.latitude, loc.longitude);
+                map.UpdateMap(_currentUserCoordinates.Value, zoomToLevel);
+                PlaceUserMarker();
+            }
+            else
+            {
+                Debug.LogWarning("GPS not running. Cannot start live 2D navigation.");
+            }
+        }
+    }
     private void RepositionTemporaryPin()
     {
         // Check if a pin exists and if we have its location stored
@@ -373,10 +535,8 @@ public class SearchManager : MonoBehaviour
                             if (result.photos != null && result.photos.Length > 0)
                             {
                                 // Calculate distance to verify it's actually close
-                                double distance = CalculateDistance(
-                                    coordinates.x, coordinates.y,
-                                    result.geometry.location.lat, result.geometry.location.lng
-                                );
+                                Vector2d resultLocation = new Vector2d(result.geometry.location.lat, result.geometry.location.lng);
+                                double distance = CalculateDistance(coordinates, resultLocation);
 
                                 if (distance < 200) // Within 200 meters
                                 {
@@ -530,23 +690,20 @@ public class SearchManager : MonoBehaviour
         placeholder.Apply();
         return placeholder;
     }
-
-    // Add this helper method to calculate distance between two GPS coordinates
-    private double CalculateDistance(double lat1, double lon1, double lat2, double lon2)
+    private double CalculateDistance(Vector2d latLon1, Vector2d latLon2)
     {
-        // Haversine formula to calculate distance in meters
         const double R = 6371000; // Earth's radius in meters
 
-        double lat1Rad = lat1 * Math.PI / 180;
-        double lat2Rad = lat2 * Math.PI / 180;
-        double deltaLat = (lat2 - lat1) * Math.PI / 180;
-        double deltaLon = (lon2 - lon1) * Math.PI / 180;
+        double lat1Rad = latLon1.x * System.Math.PI / 180;
+        double lat2Rad = latLon2.x * System.Math.PI / 180;
+        double deltaLat = (latLon2.x - latLon1.x) * System.Math.PI / 180;
+        double deltaLon = (latLon2.y - latLon1.y) * System.Math.PI / 180;
 
-        double a = Math.Sin(deltaLat / 2) * Math.Sin(deltaLat / 2) +
-                   Math.Cos(lat1Rad) * Math.Cos(lat2Rad) *
-                   Math.Sin(deltaLon / 2) * Math.Sin(deltaLon / 2);
+        double a = System.Math.Sin(deltaLat / 2) * System.Math.Sin(deltaLat / 2) +
+                   System.Math.Cos(lat1Rad) * System.Math.Cos(lat2Rad) *
+                   System.Math.Sin(deltaLon / 2) * System.Math.Sin(deltaLon / 2);
 
-        double c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+        double c = 2 * System.Math.Atan2(System.Math.Sqrt(a), System.Math.Sqrt(1 - a));
 
         return R * c; // Distance in meters
     }
@@ -578,55 +735,64 @@ public class SearchManager : MonoBehaviour
     // THIS IS THE CORRECT METHOD FOR SearchManager.cs
     private void OnUseCurrentLocationClicked()
     {
-        // It simply checks the status of the GPS service that ServicesManager is managing.
-        if (Input.location.status == LocationServiceStatus.Running)
+        if (Input.location.status != LocationServiceStatus.Running)
         {
-            startInput.onValueChanged.RemoveListener(OnStartInputChanged);
+            Debug.LogWarning("Location service is not running. Please wait for GPS signal.");
+            startInput.text = "GPS not ready...";
+            return;
+        }
 
+        // Toggle follow mode
+        _isFollowingUser = !_isFollowingUser;
+
+        if (_isFollowingUser)
+        {
+            // If we just turned on follow mode, snap to the user's location immediately.
             var locationData = Input.location.lastData;
             var userCoordinates = new Vector2d(locationData.latitude, locationData.longitude);
 
-            startInput.text = "My Current Location";
-            startCoordinates = userCoordinates;
             _currentUserCoordinates = userCoordinates;
-            suggestionScrollViewStart.SetActive(false);
-
-            map.UpdateMap(userCoordinates, zoomToLevel);
+            _isAutoCentering = true; // Set flag to prevent breaking follow
+            map.UpdateMap(userCoordinates, zoomToLevel); // Center and zoom
             PlaceUserMarker();
-
-            startInput.onValueChanged.AddListener(OnStartInputChanged);
-        }
-        else
-        {
-            // If the service isn't ready yet, it just informs the user.
-            Debug.LogWarning("Location service is not running. Please wait for GPS signal.");
-            startInput.text = "GPS not ready...";
         }
     }
     private void PlaceUserMarker()
-{
-    // If a marker doesn't exist yet, create it.
-    if (currentUserLocationMarker == null)
     {
-        if (userLocationMarkerPrefab != null)
+        if (_currentUserCoordinates == null) return;
+
+        if (currentUserLocationMarker == null)
         {
-            // Spawn the prefab at a temporary position (0,0,0).
-            // Its correct position will be set instantly by RepositionUserMarker.
-            currentUserLocationMarker = Instantiate(userLocationMarkerPrefab);
-            
-            // CRITICAL: DO NOT PARENT THE MARKER TO THE MAP.
-            // It needs to live in world space so we can control its position directly.
+            if (userLocationMarkerPrefab != null)
+            {
+                currentUserLocationMarker = Instantiate(userLocationMarkerPrefab);
+            }
+            else
+            {
+                Debug.LogWarning("User Location Marker Prefab is not assigned!");
+                return;
+            }
         }
-        else
+
+        // Set the marker's position
+        Vector3 markerWorldPos = map.GeoToWorldPosition(_currentUserCoordinates.Value, true);
+        currentUserLocationMarker.transform.position = markerWorldPos;
+
+        // --- NEW ROTATION LOGIC ---
+        // Only rotate if we are in follow mode and have a previous position to compare
+        if (_isFollowingUser && _lastUserGpsPosition.HasValue)
         {
-            Debug.LogWarning("User Location Marker Prefab is not assigned!");
-            return;
+            Vector3 lastWorldPos = map.GeoToWorldPosition(_lastUserGpsPosition.Value);
+            Vector3 direction = (markerWorldPos - lastWorldPos).normalized;
+
+            if (direction.sqrMagnitude > 0.001f)
+            {
+                // Calculate the angle and apply it. Assumes your marker's "forward" is Z-axis.
+                float angle = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
+                currentUserLocationMarker.transform.rotation = Quaternion.Euler(0, angle, 0);
+            }
         }
     }
-
-    // Now that we know the marker exists, force an immediate reposition.
-    RepositionUserMarker();
-}
     private void OnDestinationInputChanged(string query)
     {
         if (debounceCoroutine != null) StopCoroutine(debounceCoroutine);
