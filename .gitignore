@@ -72,7 +72,6 @@ mono_crash.*
 *.unitypackage
 *.unitypackage.meta
 *.app
-
 # Crashlytics generated file
 crashlytics-build.properties
 
@@ -88,6 +87,7 @@ InitTestScene*.unity*
 # files in platform-specific subfolders, for example:
 # /Assets/AddressableAssetsData/OSX/addressables_content_state.bin
 /[Aa]ssets/AddressableAssetsData/*/*.bin*
+MapboxConfiguration.txt
 
 # Visual Scripting auto-generated files
 /[Aa]ssets/Unity.VisualScripting.Generated/VisualScripting.Flow/UnitOptions.db
@@ -97,3 +97,10 @@ InitTestScene*.unity*
 
 # Auto-generated scenes by play mode tests
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+# Ignore Mapbox API config and its meta
+Assets/Resources/Mapbox/MapboxConfiguration.txt
+Assets/Resources/Mapbox/MapboxConfiguration.txt.meta
+*/MapboxConfiguration.txt
+**/MapboxConfiguration.txt
+*/MapboxConfiguration.txt.meta
+**/MapboxConfiguration.txt.meta
